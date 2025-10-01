@@ -1,10 +1,23 @@
 import os
+import sqlite3
 from flask import Flask, request, jsonify, send_from_directory
-import json
+from simulation import generate_clicks
 
 app = Flask(__name__)
 
+DATABASE = 'database.db'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db_connection()
+    with open('schema.sql') as f:
+        conn.executescript(f.read())
+    conn.close()
 
 def allowed_file(filename):
     return '.' in filename and \
@@ -22,7 +35,6 @@ if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-heatmap_data = {}
 
 @app.route('/upload', methods=['POST', 'OPTIONS'])
 def upload_file():
@@ -37,7 +49,6 @@ def upload_file():
         filename = file.filename
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        heatmap_data[filename] = []
         return jsonify({'filename': filename})
     else:
         return jsonify({'error': 'Invalid file type'}), 400
@@ -46,18 +57,33 @@ def upload_file():
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-@app.route('/heatmap/<filename>', methods=['GET', 'POST', 'OPTIONS'])
-def handle_heatmap(filename):
-    if request.method == 'OPTIONS':
-        return '', 200
-    if request.method == 'POST':
-        data = request.get_json()
-        if filename not in heatmap_data:
-            heatmap_data[filename] = []
-        heatmap_data[filename].append(data)
-        return jsonify({'success': True})
-    else:
-        return jsonify(heatmap_data.get(filename, []))
+@app.route('/simulate_heatmap/<filename>', methods=['POST'])
+def simulate_heatmap(filename):
+    # Clear any old clicks for this image
+    conn = get_db_connection()
+    conn.execute('DELETE FROM clicks WHERE filename = ?', (filename,))
+
+    # Generate new clicks
+    clicks = generate_clicks()
+
+    # Save new clicks to the database
+    for click in clicks:
+        conn.execute('INSERT INTO clicks (filename, x, y) VALUES (?, ?, ?)',
+                     (filename, click['x'], click['y']))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/heatmap/<filename>', methods=['GET'])
+def get_heatmap(filename):
+    conn = get_db_connection()
+    clicks_cursor = conn.execute('SELECT x, y FROM clicks WHERE filename = ?',
+                               (filename,)).fetchall()
+    conn.close()
+    clicks = [{'x': row['x'], 'y': row['y'], 'value': 1} for row in clicks_cursor]
+    return jsonify(clicks)
 
 if __name__ == '__main__':
+    with app.app_context():
+        init_db()
     app.run(debug=True, use_reloader=False)
